@@ -7,6 +7,7 @@ import time
 # --- CONFIGURATION ---
 DB_FILE = "shop_inventory.db"
 MASTER_PASSWORD = "1234"  # CHANGE THIS PASSWORD!
+LOW_STOCK_THRESHOLD = 5
 
 st.set_page_config(page_title="Shop Manager", layout="wide", page_icon="🛒")
 
@@ -22,6 +23,12 @@ def make_download_button(df, filename):
         mime="text/csv",
         help="Click to download this table as an Excel-compatible CSV file"
     )
+
+def render_instructions(text):
+    """Helper to render instructions at the bottom of pages"""
+    st.divider()
+    with st.expander("ℹ️ Help Guide: How to work with this page"):
+        st.markdown(text)
 
 # --- DATABASE FUNCTIONS ---
 
@@ -84,7 +91,7 @@ def execute_sale(product_id, qty_requested, sell_price, date, note):
     c = conn.cursor()
     
     try:
-        # Check Availability (Double check logic)
+        # Check Availability
         c.execute("SELECT SUM(qty_remaining) FROM inventory WHERE product_id = ?", (product_id,))
         result = c.fetchone()[0]
         current_stock = result if result else 0
@@ -200,6 +207,20 @@ def page_products():
                 run_query("UPDATE products SET active = 1 WHERE id = ?", (prod_id,))
                 st.success("Reactivated!")
                 st.rerun()
+    
+    render_instructions("""
+    ### Welcome to the starting point of your shop system!
+    Before you can buy or sell anything, the system needs to know that a product exists. Think of this page as creating the **"Birth Certificate"** for your items.
+    
+    **How to use this page:**
+    1.  **Look at the form at the top:** This is where you introduce a new item.
+    2.  **Type the name:** Enter what the product is called (e.g., "Chicken Feed 5kg").
+    3.  **Set a Recommended Price:** This is just a helper for the sales menu later.
+    4.  **Click 'Create Product':** Once clicked, the item is saved and ready to be stocked in Page 2.
+    
+    **For Administrators:**
+    If you stop selling an item, use the **'ARCHIVE'** button. This hides it from the sales menu but keeps your old reports accurate.
+    """)
 
 def page_inventory():
     st.header("📥 Page 2: Stock In (Inventory)")
@@ -264,6 +285,20 @@ def page_inventory():
                      else:
                          st.error("Cannot delete used stock!")
 
+    render_instructions("""
+    ### This is where your shop receives goods.
+    Think of this as the **"Loading Dock"**. When a truck arrives, you enter the items here.
+    
+    **Step-by-Step Guide:**
+    1.  **Select Product:** Start typing the name of the arrived item.
+    2.  **Quantity:** Count the items physically and enter the number.
+    3.  **Buy Price (Unit):** How much did YOU pay for *one single unit*? This is critical for profit calculation.
+    4.  **Save:** Click the button to put the items on your virtual shelf.
+    
+    **The Table Below:**
+    The column **'Remaining Qty'** shows how many items from *that specific delivery* are still sitting in your shop.
+    """)
+
 def page_sales():
     st.header("💰 Page 3: Point of Sale (POS)")
     
@@ -281,32 +316,28 @@ def page_sales():
     res = run_query("SELECT SUM(qty_remaining) FROM inventory WHERE product_id=?", (pid,), fetch=True)
     curr_stock = res.iloc[0,0] if res.iloc[0,0] is not None else 0
     
-    # Info Bar
+    # --- LOW STOCK WARNING LOGIC ---
     if curr_stock == 0:
-        st.error(f"⚠ Out of stock! Available: 0")
+        st.error(f"❌ OUT OF STOCK! Available: 0")
+    elif curr_stock < LOW_STOCK_THRESHOLD:
+        st.warning(f"⚠️ LOW STOCK WARNING: Only {curr_stock} pcs left! Please reorder soon. | Rec. Price: {rec_price}")
     else:
-        st.info(f"Stock Available: {curr_stock} pcs | Rec. Price: {rec_price}")
+        st.info(f"✅ Stock Available: {curr_stock} pcs | Rec. Price: {rec_price}")
 
     with st.form("make_sale"):
         col1, col2 = st.columns(2)
-        
-        # CORRECTED: Removed max_value to allow higher input (for validation check later)
-        qty = col1.number_input("Quantity", min_value=1, step=1)
-        
-        price = col2.number_input("Price", value=float(rec_price), min_value=0.0, step=0.01)
+        qty = col1.number_input("Quantity to Sell", min_value=1, step=1)
+        price = col2.number_input("Sell Price", value=float(rec_price), min_value=0.0, step=0.01)
         
         col3, col4 = st.columns(2)
         date = col3.date_input("Date", datetime.now())
-        note = col4.text_input("Note")
+        note = col4.text_input("Note/Customer Name")
         
         submitted = st.form_submit_button("✅ ADD SALE")
         
         if submitted:
-            # CORRECTED: Explicit check for sufficient stock
             if qty > curr_stock:
                 st.error(f"❌ ERROR: Insufficient stock! You have {curr_stock} pcs, but tried to sell {qty} pcs.")
-            elif curr_stock == 0:
-                st.error("❌ ERROR: Cannot sell items with 0 stock.")
             else:
                 success, msg = execute_sale(pid, qty, price, date, note)
                 if success:
@@ -321,20 +352,28 @@ def page_sales():
     
     q_sales = """
         SELECT s.id, s.date as 'Date', p.name as 'Product', s.qty_sold as 'Qty', 
-               s.sell_price as 'Unit Price', s.total_sell_price as 'Total', s.note as 'Note'
+               s.sell_price as 'Price', s.total_sell_price as 'Total', s.note as 'Note'
         FROM sales s
         JOIN products p ON s.product_id = p.id
         ORDER BY s.date DESC, s.id DESC
         LIMIT 100
     """
     df_sales = run_query(q_sales, fetch=True)
-    
     make_download_button(df_sales, "sales_log.csv")
     st.dataframe(df_sales, use_container_width=True)
 
-    if st.session_state['is_admin']:
-        with st.expander("🛠 Admin: Manage Sales"):
-             st.info("Deleting sales is disabled to protect financial integrity.")
+    render_instructions("""
+    ### Welcome to the Cash Register!
+    This is where you record money coming in. 
+    
+    **The Sales Flow:**
+    1.  **Select Product:** Pick the item. The system will alert you if stock is low (under 5 pcs) with an orange bar.
+    2.  **Check Stock:** If you see a red bar, you cannot sell the item until you add stock in Page 2.
+    3.  **Enter Quantity:** If you try to sell more than you have, the system will block the transaction.
+    4.  **Confirm Price:** The system suggests the recommended price, but you can change it manually.
+    
+    **FIFO Logic:** The system automatically sells the *oldest* stock first to ensure your profit reports are mathematically perfect.
+    """)
 
 def page_stock_report():
     st.header("🔎 Page 4: Stock Status")
@@ -364,8 +403,28 @@ def page_stock_report():
         
     df = run_query(query, fetch=True)
     
-    make_download_button(df, "current_stock.csv")
-    st.dataframe(df, use_container_width=True)
+    # --- HIGHLIGHT LOW STOCK IN TABLE ---
+    def highlight_low_stock(val):
+        color = 'red' if val < LOW_STOCK_THRESHOLD else 'white'
+        return f'color: {color}; font-weight: bold' if val < LOW_STOCK_THRESHOLD else ''
+
+    if not df.empty:
+        styled_df = df.style.map(highlight_low_stock, subset=['Stock'])
+        st.dataframe(styled_df, use_container_width=True)
+        make_download_button(df, "current_stock.csv")
+    else:
+        st.info("Your shop is empty. Add stock in Page 2.")
+
+    render_instructions("""
+    ### Your Warehouse at a Glance
+    This page shows you what is currently on your shelves.
+    
+    **Visual Alerts:**
+    * **Red Numbers:** If a quantity in the 'Stock' column is red, it means you have less than 5 items left. It's time to reorder!
+    * **Avg Buy Price:** This tells you the average cost of the items you currently have.
+    
+    **Tip:** Use this page to do a quick inventory check at the end of the day.
+    """)
 
 def page_financial_report():
     if not st.session_state['is_admin']:
@@ -400,9 +459,17 @@ def page_financial_report():
         c1.metric("Daily Turnover", f"{total_turnover:.2f}")
         c2.metric("Total Profit", f"{total_profit:.2f}")
         c3.metric("Items Sold", f"{total_qty}")
-    
-    make_download_button(df, f"sales_report_{filter_date}.csv")
-    st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True)
+        make_download_button(df, f"sales_report_{filter_date}.csv")
+    else:
+        st.info("No sales recorded for this date.")
+
+    render_instructions("""
+    ### The Financial Audit Trail
+    This is the **"Truth Page"**. It shows you exactly how much money you made on every single transaction today.
+    * **Profit:** Calculated as (Total Sales - Actual Cost of those specific items).
+    * **Margin %:** Shows your efficiency. High margin = high profit per item.
+    """)
 
 def page_item_sales_report():
     if not st.session_state['is_admin']:
@@ -430,9 +497,14 @@ def page_item_sales_report():
     """
     
     df = run_query(query, (d_start, d_end), fetch=True)
-    
-    make_download_button(df, f"item_report_{d_start}_{d_end}.csv")
     st.dataframe(df, use_container_width=True)
+    make_download_button(df, f"item_report_{d_start}_{d_end}.csv")
+
+    render_instructions("""
+    ### Analyze Your Best Sellers
+    This page aggregates your data. Instead of listing every sale, it shows you the **Total Performance** of each product over time.
+    * Use this to see which product is your biggest money-maker.
+    """)
 
 def page_pricelist():
     st.header("📋 Page 7: Price List")
@@ -452,101 +524,77 @@ def page_pricelist():
         if x['Sell Price'] > 0 and x['Avg Stock Price'] > 0 else 0, axis=1
     )
     
-    make_download_button(df, "price_list.csv")
     st.dataframe(df, use_container_width=True)
+    make_download_button(df, "price_list.csv")
+
+    render_instructions("""
+    ### Strategic Pricing Dashboard
+    This page tells you: *"If I sell this item at my recommended price, how much will I make?"*
+    * It compares your planned price against the **actual average cost** of items currently in stock.
+    """)
 
 def page_daily_report():
     if not st.session_state['is_admin']:
-        st.error("Access Denied! Admin only.")
+        st.error("Access Denied!")
         return
 
     st.header("📅 Page 8: Daily Financial Report")
     
-    # Date Filter
     c1, c2 = st.columns(2)
     d_start = c1.date_input("From Date", datetime.now())
     d_end = c2.date_input("To Date", datetime.now())
     
-    # SQL Query: Group by Date
     query = """
-    SELECT date as 'Date', 
-           SUM(qty_sold) as 'Total Qty',
-           SUM(cost_basis) as 'Total Cost',
-           SUM(total_sell_price) as 'Total Revenue'
-    FROM sales
-    WHERE date BETWEEN ? AND ?
-    GROUP BY date
-    ORDER BY date DESC
+    SELECT date as 'Date', SUM(qty_sold) as 'Total Qty', SUM(cost_basis) as 'Total Cost', SUM(total_sell_price) as 'Total Revenue'
+    FROM sales WHERE date BETWEEN ? AND ? GROUP BY date ORDER BY date DESC
     """
-    
     df = run_query(query, (d_start, d_end), fetch=True)
     
     if df.empty:
-        st.info("No sales found for this period.")
+        st.info("No data for this period.")
         return
 
-    # Calculate Profit and Margin in Python
     df['Total Profit'] = df['Total Revenue'] - df['Total Cost']
-    
-    df['Margin %'] = df.apply(
-        lambda x: round((x['Total Profit'] / x['Total Revenue'] * 100), 1) 
-        if x['Total Revenue'] > 0 else 0, axis=1
-    )
-    
-    # Reorder columns
+    df['Margin %'] = df.apply(lambda x: round((x['Total Profit'] / x['Total Revenue'] * 100), 1) if x['Total Revenue'] > 0 else 0, axis=1)
     df = df[['Date', 'Total Revenue', 'Total Cost', 'Total Qty', 'Total Profit', 'Margin %']]
-    
-    make_download_button(df, f"daily_report_{d_start}_{d_end}.csv")
     
     st.dataframe(df, use_container_width=True)
     
     st.divider()
     st.subheader("📝 Period Summary")
-    
-    # Calculate Totals
     sum_revenue = df['Total Revenue'].sum()
-    sum_cost = df['Total Cost'].sum()
-    sum_qty = df['Total Qty'].sum()
     sum_profit = df['Total Profit'].sum()
     avg_margin = (sum_profit / sum_revenue * 100) if sum_revenue > 0 else 0
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Total Revenue", f"{sum_revenue:.2f}")
-    col2.metric("Total Cost", f"{sum_cost:.2f}")
-    col3.metric("Total Qty", f"{sum_qty}")
-    col4.metric("Total Profit", f"{sum_profit:.2f}")
-    col5.metric("Avg Margin", f"{avg_margin:.1f}%")
+    col2.metric("Total Profit", f"{sum_profit:.2f}")
+    col3.metric("Avg Margin", f"{avg_margin:.1f}%")
+    make_download_button(df, "daily_report.csv")
+
+    render_instructions("""
+    ### The Executive Summary
+    This page groups your sales by **Day**. It's the best way to see the growth of your business over weeks or months.
+    """)
 
 # --- MAIN MENU ---
 
 def main():
     init_db()
-    
     if not st.session_state['logged_in']:
         login()
-        st.info("Please select a role and login.")
         return
 
-    st.sidebar.title("Navigation")
-    st.sidebar.write(f"User: **{'ADMIN' if st.session_state['is_admin'] else 'Operator'}**")
-    
+    st.sidebar.title("Shop Navigation")
+    st.sidebar.write(f"Logged as: **{st.session_state['is_admin'] and 'Admin' or 'Operator'}**")
     if st.sidebar.button("Logout"):
         logout()
     
-    st.sidebar.divider()
-    
-    options = [
-        "1. Products", 
-        "2. Inventory (Stock In)", 
-        "3. POS (Sales)", 
-        "4. Stock Status",
-        "7. Price List"
-    ]
-    
+    options = ["1. Products", "2. Inventory (Stock In)", "3. POS (Sales)", "4. Stock Status", "7. Price List"]
     if st.session_state['is_admin']:
         options.extend(["5. Sales Log (Detailed)", "6. Sales by Item", "8. Daily Report"])
         
-    choice = st.sidebar.radio("Go to:", options)
+    choice = st.sidebar.radio("Go to Page:", options)
     
     if "1." in choice: page_products()
     elif "2." in choice: page_inventory()
